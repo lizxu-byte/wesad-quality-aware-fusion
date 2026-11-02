@@ -41,7 +41,7 @@ from fusion import io  # noqa: E402
 from fusion.dataset import CLASSES, build_subject_table, calibrate, calibration_means, segment  # noqa: E402
 from fusion.evaluate import loso_run, paired_test, subject_metrics, summarise  # noqa: E402
 from fusion.features import CHEST, MODALITIES, WRIST, Params, extract, feature_columns  # noqa: E402
-from fusion.models import STRATEGIES, make_base  # noqa: E402
+from fusion.models import STRATEGIES, fit_fold, make_base  # noqa: E402
 from fusion.robustness import ART_SCENARIOS, DROP_SCENARIOS, LEVELS, SCENARIOS, Variants, corrupt_subject, scenario_mods  # noqa: E402
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -466,6 +466,8 @@ def main() -> None:
                 for sc in SCENARIOS:
                     c50 = cvs[(cvs.task == task) & (cvs.kind == kind) & (cvs.set == st) & (cvs.scenario == sc) & (cvs.level == 0.5)]
                     c0 = cvs[(cvs.task == task) & (cvs.kind == kind) & (cvs.set == st) & (cvs.scenario == sc) & (cvs.level == 0.0)]
+                    add("corrupted_50pct_qw_vs_avg", task, kind, f"{st} / {sc}: qw_rule - late_avg", ser(c50, strategy="qw_rule"),
+                        ser(c50, strategy="late_avg"))
                     for s2 in ("qw_rule", "qw_learned", "late_avg", "stack"):
                         add("corrupted_50pct", task, kind, f"{st} / {sc}: {s2} - early", ser(c50, strategy=s2), ser(c50, strategy="early"))
                         # graceful degradation: loss from clean to 50 % (positive = smaller loss for s2)
@@ -481,6 +483,21 @@ def main() -> None:
         adj = np.minimum(1, np.maximum.accumulate([(k - i) * tests.loc[ix, "p_wilcoxon"] for i, ix in enumerate(order)]))
         tests.loc[order, "p_holm"] = adj
     tests.to_csv(out / "wilcoxon.csv", index=False, float_format="%.4g")
+
+    # ---- learned quality weights (logistic-regression base models; cheap to refit per fold)
+    wrows = []
+    for task in CLASSES:
+        d = ev[ev["label"].isin(CLASSES[task])].reset_index(drop=True)
+        for subj, tr, _ in loso_splits(d["subject"].to_numpy()):
+            fm = fit_fold(d.iloc[tr], CLASSES[task], {"wrist": WRIST, "all": list(MODALITIES)}, "lr")
+            for st, (a, b) in fm.qw.items():
+                w1 = np.exp(a + b)  # weight at quality 1
+                for i, mo in enumerate(fm.sets[st]):
+                    wrows.append({"task": task, "set": st, "fold": subj, "modality": mo, "a": a[i], "b": b[i],
+                                  "weight_share_at_q1": w1[i] / w1.sum(), "weight_ratio_q0_to_q1": float(np.exp(-b[i]))})
+    qww = pd.DataFrame(wrows).groupby(["task", "set", "modality"])[["a", "b", "weight_share_at_q1", "weight_ratio_q0_to_q1"]].agg(["mean", "std"])
+    qww.columns = ["_".join(c) for c in qww.columns]
+    qww.reset_index().to_csv(out / "qw_learned_weights_lr.csv", index=False, float_format="%.3f")
 
     # ---- figures
     fig_contribution(clean, lomo, fwd, out, kinds[0])
@@ -550,6 +567,8 @@ def fig_contribution(clean, lomo, fwd, out, kind):
     ax.set_ylim(lo_ - 0.03, min(1.005, hi_ + 0.02))
     ax.set_title("Which sensors are worth wearing (label colour = device)", fontsize=9, loc="left", color=TEXT)
     style(ax)
+    for t, d in zip(ax.get_xticklabels(), f["device"]):  # after style(), which resets tick colours
+        t.set_color(C_DEV[d])
     handles = [plt.Rectangle((0, 0), 1, 1, color=C_DEV[d]) for d in ("chest", "wrist")]
     axes[0].legend(handles + axes[0].get_legend_handles_labels()[0], ["chest (RespiBAN)", "wrist (E4)"] + axes[0].get_legend_handles_labels()[1],
                    frameon=False, fontsize=8, loc="lower right")
