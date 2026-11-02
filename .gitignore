@@ -223,3 +223,4 @@ __marimo__/
 # WESAD files and every per-sample / per-window derived array stay local (no redistribution)
 data/
 results/cache/
+results/quick/
