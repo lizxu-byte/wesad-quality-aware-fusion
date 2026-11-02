@@ -218,3 +218,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- project specific ---
+# WESAD files and every per-sample / per-window derived array stay local (no redistribution)
+data/
+results/cache/
